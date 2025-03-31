@@ -233,7 +233,7 @@ export default function PositionEditPage() {
       </h1>
       <form onSubmit={handleSubmit} className="mb-8 space-y-6 bg-white p-6 shadow rounded">
         <div>
-        <label className="block mb-2 font-medium">ポジション名:　二交代や日直主、休み(種類)なども勤務表に載せたい場合は、登録してください。休み(有給),休み(振休),休み(代休)は、この書き方をすれば”休み編集”に登録した内容が自動で反映されます。</label>
+        <label className="block mb-2 font-medium">ポジション名:　二交代や日直主、休み(種類)なども勤務表に載せたい場合は、登録してください。休み(有休),休み(振休),休み(代休)は、この書き方をすれば”休み編集”に登録した内容が自動で反映されます。</label>
           <input
             type="text"
             value={formData.name}
@@ -284,7 +284,7 @@ export default function PositionEditPage() {
               })
             }
             required
-            placeholder="例: 病理,血液     休み(有休)半角カッコで囲むこと"
+            placeholder="例: 病理"
             className="w-full p-3 border border-gray-300 rounded focus:outline-none focus:ring focus:border-blue-400"
           />
         </div>
