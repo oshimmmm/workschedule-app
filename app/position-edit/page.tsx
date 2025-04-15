@@ -466,7 +466,7 @@ interface CellSelectorProps {
 }
 
 function CellSelector({ positions, onChange, onCellSelect, previewMonth }: CellSelectorProps) {
-  const columns = Array.from({ length: 23 }, (_, i) => String.fromCharCode(65 + i));
+  const columns = Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i));
   const rows = Array.from({ length: 3 }, (_, i) => i + 1);
 
   const cellAssignments: { [cell: string]: Position[] } = {};
