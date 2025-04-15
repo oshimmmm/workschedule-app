@@ -345,7 +345,7 @@ export default function PositionEditPage() {
               onChange={(e) => setFormData({ ...formData, staffSeveral: e.target.checked })}
               className="mr-2"
             />
-            早番、遅番、採血、夜勤ですか？
+            早番、遅番、採血、夜勤、日直ですか？
           </label>
         </div>
         {/* 当日休み・翌日休みのチェックボックス */}
