@@ -612,11 +612,11 @@ export async function POST(request: Request) {
         // 配置回数が均等でない場合に調整を行う
         if (maxCount - minCount > 1) {
           const overAssignedStaff = Object.entries(assignedCounts)
-            .filter(([_, count]) => count > minCount)
+            .filter(([, count]) => count > minCount)
             .map(([staffName]) => staffName);
 
           const underAssignedStaff = Object.entries(assignedCounts)
-            .filter(([_, count]) => count === minCount)
+            .filter(([, count]) => count === minCount)
             .map(([staffName]) => staffName);
 
           for (const dateStr of Object.keys(staffAssignments)) {
