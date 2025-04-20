@@ -245,7 +245,7 @@ export async function POST(request: Request) {
         }
       }
     }
-    console.log(`事前計算: 日付 ${dStr} の specialHolidays =`, preCalcSpecialHolidays[dStr]);
+    // console.log(`事前計算: 日付 ${dStr} の specialHolidays =`, preCalcSpecialHolidays[dStr]);
   }
 
   // クライアントから送られてきた年月の1か月前のデータを取得
@@ -346,9 +346,9 @@ export async function POST(request: Request) {
     overallCounts[staff.name] = 0;
   });
 
-  console.log(`[generate] dates.length = ${dates.length}`);
-  console.log(`[generate] positions.length = ${filteredPositions.length}`);
-  console.log(`[generate] staffList.length = ${filteredStaffList.length}`);
+  // console.log(`[generate] dates.length = ${dates.length}`);
+  // console.log(`[generate] positions.length = ${filteredPositions.length}`);
+  // console.log(`[generate] staffList.length = ${filteredStaffList.length}`);
 
 
   // ──────────────────────────────
@@ -552,101 +552,91 @@ export async function POST(request: Request) {
 
       // staffSeveral=true の割当処理
       for (const pos of normalPositions) {
-        if (pos.dependence && pos.dependence.trim() !== "") continue;
-        if (referencedIndependentIds.has(pos.id)) continue;
-        if (!pos.staffSeveral) continue;
-        if (!staffSeveralCounts[pos.id]) {
-          staffSeveralCounts[pos.id] = {};
-        }
+        if (!pos.staffSeveral) continue;       // staffSeveral だけ
+        if (pos.allowMultiple) continue;       // allowMultiple が true ならスキップ（前提では false）
 
-        // 候補スタッフをフィルタリング
-        const candidates = filteredStaffList.filter((s) => {
-          if (!s.availablePositions || !s.availablePositions.includes(pos.name)) return false;
+        // 「YYYY-MM-DD」形式の当日・翌営業日を取得
+        const todayStr = dateStr;
+        // const nextBusinessDayStr = await getNextBusinessDay(date);
+
+        // 当日・翌営業日の“通常休”セット
+        const todayOff = new Set(
+          [...holidayStaffYukyu, ...holidayStaffFurikyu, ...holidayStaffDaikyu]
+            .map(s => s.name)
+        );
+        // const nextOff = nextBusinessDayStr
+        //   ? new Set(
+        //     filteredStaffList
+        //       .filter(s =>
+        //       (s.holidaysYukyu?.includes(nextBusinessDayStr) ||
+        //         s.holidaysFurikyu?.includes(nextBusinessDayStr) ||
+        //         s.holidaysDaikyu?.includes(nextBusinessDayStr))
+        //       )
+        //       .map(s => s.name)
+        //   )
+        //   : new Set<string>();
+
+        // 当日・翌営業日の“特別休”セット
+        const specialToday = preCalcSpecialHolidays[todayStr] ?? new Set<string>();
+        // const specialNext = nextBusinessDayStr
+        //   ? (preCalcSpecialHolidays[nextBusinessDayStr] ?? new Set<string>())
+        //   : new Set<string>();
+
+        // console.log(
+        //   `[DEBUG][${todayStr}] pos=${pos.name} カウント状況:`,
+        //   staffSeveralCounts[pos.id] ?? {}
+        // );
+
+        // 候補フィルタリング
+        const candidates = filteredStaffList.filter(s => {
+          if (!s.availablePositions.includes(pos.name)) return false;
           if (dailyAssignedSeveral.has(s.name)) return false;
-          if (
-            holidayStaffYukyu.some((h) => h.name === s.name) ||
-            holidayStaffFurikyu.some((h) => h.name === s.name) ||
-            holidayStaffDaikyu.some((h) => h.name === s.name)
-          )
-            return false;
-          if (specialAssignedTomorrowOnly.has(s.name)) return false;
+          if (todayOff.has(s.name) || specialToday.has(s.name)) return false;
+          if (specialAssigned.has(s.name) || specialAssignedTomorrowOnly.has(s.name)) return false;
+          // if (nextOff.has(s.name)   || specialNext.has(s.name))  return false;
           if (!availableStaff.has(s.name)) return false;
           return true;
         });
 
-        if (candidates.length > 0) {
-          // 配置回数が最小のスタッフを優先的に選択
-          let minCount = Infinity;
-          for (const s of candidates) {
-            const count = staffSeveralCounts[pos.id][s.name] || 0;
-            if (count < minCount) minCount = count;
-          }
-          const finalCandidates = candidates.filter(
-            (s) => (staffSeveralCounts[pos.id][s.name] || 0) === minCount
-          );
+        // console.log(
+        //   `[DEBUG][${todayStr}] pos=${pos.name} 候補スタッフ:`,
+        //   candidates.map(s => s.name)
+        // );
 
-          // 候補者からランダムに選択
-          const chosenObj = finalCandidates[Math.floor(Math.random() * finalCandidates.length)];
-          const chosen = chosenObj.name;
-
-          // 割当処理
-          staffAssignments[dateStr][pos.id].push(chosen);
-          dailyAssignedSeveral.add(chosen);
-          staffSeveralCounts[pos.id][chosen] = (staffSeveralCounts[pos.id][chosen] || 0) + 1;
-        } else {
-          // 候補がいない場合
-          staffAssignments[dateStr][pos.id].push(pos.required ? "未配置" : "");
+        if (candidates.length === 0) {
+          // 候補なし → 未配置 or 空文字
+          staffAssignments[todayStr][pos.id].push(pos.required ? "未配置" : "");
+          continue;
         }
-      }
 
-      // staffSeveral=true かつ allowMultiple=false のポジションにおける配置回数を均等化
-      const staffSeveralSinglePositions = normalPositions.filter(
-        (pos) => pos.staffSeveral && !pos.allowMultiple
-      );
-
-      for (const pos of staffSeveralSinglePositions) {
-        const assignedCounts = staffSeveralCounts[pos.id] || {};
-        const minCount = Math.min(...Object.values(assignedCounts));
-        const maxCount = Math.max(...Object.values(assignedCounts));
-
-        // 配置回数が均等でない場合に調整を行う
-        if (maxCount - minCount > 1) {
-          const overAssignedStaff = Object.entries(assignedCounts)
-            .filter(([, count]) => count > minCount)
-            .map(([staffName]) => staffName);
-
-          const underAssignedStaff = Object.entries(assignedCounts)
-            .filter(([, count]) => count === minCount)
-            .map(([staffName]) => staffName);
-
-          for (const dateStr of Object.keys(staffAssignments)) {
-            const assignedStaff = staffAssignments[dateStr][pos.id];
-            if (!assignedStaff || assignedStaff.length === 0) continue;
-
-            // 割り当てられたスタッフを調整
-            for (let i = 0; i < assignedStaff.length; i++) {
-              const staffName = assignedStaff[i];
-              if (overAssignedStaff.includes(staffName) && underAssignedStaff.length > 0) {
-                // 配置回数が少ないスタッフに置き換える
-                const newStaff = underAssignedStaff.shift();
-                if (newStaff) {
-                  assignedStaff[i] = newStaff;
-                  staffSeveralCounts[pos.id][staffName]--;
-                  staffSeveralCounts[pos.id][newStaff] = (staffSeveralCounts[pos.id][newStaff] || 0) + 1;
-
-                  // 再度均等化のためのリストを更新
-                  overAssignedStaff.splice(overAssignedStaff.indexOf(staffName), 1);
-                  if (staffSeveralCounts[pos.id][staffName] > minCount) {
-                    overAssignedStaff.push(staffName);
-                  }
-                  if (staffSeveralCounts[pos.id][newStaff] === minCount + 1) {
-                    underAssignedStaff.splice(underAssignedStaff.indexOf(newStaff), 1);
-                  }
-                }
-              }
-            }
-          }
+        // 最小割当回数スタッフを抽出
+        let minCount = Infinity;
+        for (const s of candidates) {
+          const cnt = staffSeveralCounts[pos.id]?.[s.name] || 0;
+          if (cnt < minCount) minCount = cnt;
         }
+        const final = candidates.filter(s => (staffSeveralCounts[pos.id]?.[s.name] || 0) === minCount);
+
+        // console.log(
+        //   `[DEBUG][${todayStr}] pos=${pos.name} 最小カウントグループ:`,
+        //   final.map(s => s.name),
+        //   `(count=${minCount})`
+        // );
+
+        // ランダムに1名を選択
+        const chosen = final[Math.floor(Math.random() * final.length)].name;
+
+        // ★ デバッグログ：選ばれたスタッフを表示
+        // console.log(
+        //   `[DEBUG][${todayStr}] pos=${pos.name} 選択:`,
+        //   chosen
+        // );
+
+        // 割当＆カウント更新
+        staffAssignments[todayStr][pos.id].push(chosen);
+        dailyAssignedSeveral.add(chosen);
+        staffSeveralCounts[pos.id] = staffSeveralCounts[pos.id] || {};
+        staffSeveralCounts[pos.id][chosen] = (staffSeveralCounts[pos.id][chosen] || 0) + 1;
       }
 
       // ──【① 依存ポジションの割当処理】──────────────────────────
@@ -783,16 +773,16 @@ export async function POST(request: Request) {
               .map(s => s.name)
           )
           : new Set<string>();
-        console.log(
-          `被依存ポジション ${pos.name}：次営業日(${nextBusinessDateStr})の specialHolidays:`,
-          specialHolidaysNext,
-          "holidaysYukyu:",
-          holidaysYukyuNext,
-          "holidaysFurikyu:",
-          holidaysFurikyuNext,
-          "holidaysDaikyu:",
-          holidaysDaikyuNext
-        );
+        // console.log(
+        //   `被依存ポジション ${pos.name}：次営業日(${nextBusinessDateStr})の specialHolidays:`,
+        //   specialHolidaysNext,
+        //   "holidaysYukyu:",
+        //   holidaysYukyuNext,
+        //   "holidaysFurikyu:",
+        //   holidaysFurikyuNext,
+        //   "holidaysDaikyu:",
+        //   holidaysDaikyuNext
+        // );
         // 候補となるスタッフを抽出（availablePositionsに該当ポジションが含まれ、利用可能なスタッフのみ）
         const candidates = filteredStaffList.filter((s) => {
           if (!s.availablePositions || !s.availablePositions.includes(pos.name)) return false;
@@ -807,7 +797,7 @@ export async function POST(request: Request) {
             return false;
           return true;
         }).map((s) => s.name);
-        console.log(`被依存ポジション ${pos.name}：候補スタッフ:`, candidates);
+        // console.log(`被依存ポジション ${pos.name}：候補スタッフ:`, candidates);
         if (candidates.length > 0) {
           // ランダムに候補から1名選出
           const chosen = candidates[Math.floor(Math.random() * candidates.length)];
@@ -911,9 +901,9 @@ export async function POST(request: Request) {
         assignmentValid = true;
       } else {
         attempt++;
-        console.log(
-          `【${dateStr}】再配置試行 ${attempt} 回目: 未配置のスタッフ -> ${Array.from(availableStaff).join(", ")}`
-        );
+        // console.log(
+        //   `【${dateStr}】再配置試行 ${attempt} 回目: 未配置のスタッフ -> ${Array.from(availableStaff).join(", ")}`
+        // );
       }
     }
   }
@@ -943,7 +933,7 @@ export async function POST(request: Request) {
       cell.alignment = { vertical: "middle", horizontal: "center" }; // 中央揃え
     });
   });
-  
+
   // 土曜日・日曜日・日本の祝日の行を薄いグレーで塗りつぶす
   for (let i = 2; i <= dates.length + 1; i++) {
     const date = dates[i - 2]; // dates配列は0始まりなので調整
