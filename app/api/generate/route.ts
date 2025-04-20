@@ -78,6 +78,16 @@ function formatDateLocal(date: Date): string {
 }
 
 /**
+ * 日付オブジェクトを "D 曜日" 形式の文字列に変換する関数
+ */
+function formatDateWithDay(date: Date): string {
+  const dayNames = ["日", "月", "火", "水", "木", "金", "土"];
+  const day = date.getDate();
+  const dayOfWeek = dayNames[date.getDay()];
+  return `${day} ${dayOfWeek}`;
+}
+
+/**
  * 指定した "YYYY-MM" 形式の文字列から、その月の日付すべての配列を生成する
  */
 function getDatesInMonth(monthStr: string): Date[] {
@@ -133,31 +143,6 @@ async function getPreviousBusinessDay(date: Date): Promise<string | null> {
   }
   return attempts < 10 ? formatDateLocal(prev) : null;
 }
-
-// async function isCandidateAvailableNextBusinessDay(
-//   candidate: string,
-//   currentDate: Date,
-//   filteredStaffList: StaffData[],
-//   specialHolidaysNext?: Set<string>,
-//   holidaysYukyuNext?: Set<string>,
-//   holidaysFurikyuNext?: Set<string>,
-//   holidaysDaikyuNext?: Set<string>
-// ): Promise<boolean> {
-//   const nextBusinessDateStr = await getNextBusinessDay(currentDate);
-//   if (!nextBusinessDateStr) return false;
-//   const staff = filteredStaffList.find((s) => s.name === candidate);
-//   if (!staff) return false;
-//   if (staff.holidaysYukyu && staff.holidaysYukyu.includes(nextBusinessDateStr)) return false;
-//   if (staff.holidaysFurikyu && staff.holidaysFurikyu.includes(nextBusinessDateStr)) return false;
-//   if (staff.holidaysDaikyu && staff.holidaysDaikyu.includes(nextBusinessDateStr)) return false;
-//   if (specialHolidaysNext && specialHolidaysNext.has(candidate)) return false;
-//   if (holidaysYukyuNext && holidaysYukyuNext.has(candidate)) return false;
-//   if (holidaysFurikyuNext && holidaysFurikyuNext.has(candidate)) return false;
-//   if (holidaysDaikyuNext && holidaysDaikyuNext.has(candidate)) return false;
-//   return true;
-// }
-
-
 
 /**
  * POSTリクエストにより、指定された月と部門に基づいて勤務表Excelファイルを生成する
@@ -224,6 +209,9 @@ export async function POST(request: Request) {
   // ──────────────────────────────
   // 事前計算フェーズ：対象月全体の specialHolidays 情報を算出
   // ──────────────────────────────
+  // 特別割当による休暇の割当情報を保持（日付ごとにスタッフ名セット）
+  const specialHolidays: { [dateStr: string]: Set<string> } = {};
+
   // 各日付ごとに、特定のポジションでスタッフに対して割り当てられる「特別休暇」の情報を収集
   const preCalcSpecialHolidays: { [dateStr: string]: Set<string> } = {};
   for (const date of dates) {
@@ -260,6 +248,57 @@ export async function POST(request: Request) {
     console.log(`事前計算: 日付 ${dStr} の specialHolidays =`, preCalcSpecialHolidays[dStr]);
   }
 
+  // クライアントから送られてきた年月の1か月前のデータを取得
+  const previousMonth = new Date(month);
+  previousMonth.setMonth(previousMonth.getMonth() - 1);
+  const previousMonthStr = formatDateLocal(previousMonth).slice(0, 7); // "YYYY-MM"形式
+
+  // 1か月前の全日付リストを生成
+  const previousDates = getDatesInMonth(previousMonthStr);
+
+  // 1か月前のデータをFirebaseから取得
+  const previousSpecialHolidays: { [dateStr: string]: Set<string> } = {};
+  for (const date of previousDates) {
+    const dStr = formatDateLocal(date);
+    if (!previousSpecialHolidays[dStr]) {
+      previousSpecialHolidays[dStr] = new Set<string>();
+    }
+    for (const pos of normalPositions) {
+      for (const staff of staffList) {
+        const staffIndexable = staff as StaffIndexable;
+        const specialField = staffIndexable[pos.name] as string[] | undefined;
+        if (Array.isArray(specialField) && specialField.includes(dStr)) {
+          if (pos.horidayToday && pos.horidayTomorrow) {
+            previousSpecialHolidays[dStr].add(staff.name);
+            const nextDateStr = await getNextBusinessDay(date);
+            if (nextDateStr) {
+              preCalcSpecialHolidays[nextDateStr] = new Set<string>([staff.name]);
+            }
+          } else if (pos.horidayToday) {
+            previousSpecialHolidays[dStr].add(staff.name);
+          } else if (!pos.horidayToday && pos.horidayTomorrow) {
+            const nextDateStr = await getNextBusinessDay(date);
+            if (nextDateStr) {
+              preCalcSpecialHolidays[nextDateStr] = new Set<string>([staff.name]);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 1か月前の翌日休み情報を現在の月に反映
+  for (const [dateStr, staffSet] of Object.entries(previousSpecialHolidays)) {
+    const nextDate = new Date(dateStr);
+    nextDate.setDate(nextDate.getDate() + 1);
+    const nextDateStr = formatDateLocal(nextDate);
+    if (dates.some((d) => formatDateLocal(d) === nextDateStr)) {
+      if (!specialHolidays[nextDateStr]) {
+        specialHolidays[nextDateStr] = new Set<string>();
+      }
+      staffSet.forEach((staff) => specialHolidays[nextDateStr].add(staff));
+    }
+  }
 
   // ──────────────────────────────
   // Excelファイル生成フェーズ
@@ -296,12 +335,11 @@ export async function POST(request: Request) {
 
   // 日付ごとに各ポジションへ割り当てられたスタッフ名リストを保持するオブジェクト
   const staffAssignments: { [dateStr: string]: { [posId: string]: string[] } } = {};
-// staffSeveral=true のポジションごとにスタッフ別の割当回数を管理するためのカウンター
+  // staffSeveral=true のポジションごとにスタッフ別の割当回数を管理するためのカウンター
   const staffSeveralCounts: { [posId: string]: { [staffName: string]: number } } = {};
   // 通常の（staffSeveral=false）ポジションごとのスタッフ別カウンター
   const normalCounts: { [posId: string]: { [staffName: string]: number } } = {};
-  // 特別割当による休暇の割当情報を保持（日付ごとにスタッフ名セット）
-  const specialHolidays: { [dateStr: string]: Set<string> } = {};
+
 
   console.log(`[generate] dates.length = ${dates.length}`);
   console.log(`[generate] positions.length = ${filteredPositions.length}`);
@@ -313,10 +351,11 @@ export async function POST(request: Request) {
   // ──────────────────────────────
   for (let i = 0; i < dates.length; i++) {
     const date = dates[i];
-    const dateStr = formatDateLocal(date);
+    const dateStr = formatDateLocal(date); // ロジック内では "YYYY-MM-DD" を使用
+    const displayDateStr = formatDateWithDay(date); // A列の出力用に "1 曜日" を使用
     // Excel上での日付表示行は、ヘッダー行(A1)の次から開始（2行目以降
     const rowIndex = i + 2;
-    worksheet.getCell(`A${rowIndex}`).value = dateStr;
+    worksheet.getCell(`A${rowIndex}`).value = displayDateStr;
     const day = date.getDay();
 
     // 当該日の週初（月曜日）を算出する処理
@@ -463,7 +502,7 @@ export async function POST(request: Request) {
       specialHolidays[dateStr].forEach((name) => unassignedStaff.delete(name));
     }
 
-    
+
     // ──────────────────────────────
     // 【平日割当のスキップ条件】
     // ──────────────────────────────
@@ -566,7 +605,7 @@ export async function POST(request: Request) {
         // 前営業日の依存先ポジションの最終割当スタッフを取得
         const candidateStaff =
           staffAssignments[prevBusinessDateStr][independentPosId][
-            staffAssignments[prevBusinessDateStr][independentPosId].length - 1
+          staffAssignments[prevBusinessDateStr][independentPosId].length - 1
           ];
         staffAssignments[dateStr][pos.id].push(candidateStaff);
         availableStaff.delete(candidateStaff);
@@ -661,24 +700,24 @@ export async function POST(request: Request) {
         // 翌営業日の各種休暇対象スタッフをセット化
         const holidaysYukyuNext = nextBusinessDateStr
           ? new Set(
-              filteredStaffList
-                .filter(s => s.holidaysYukyu && s.holidaysYukyu.includes(nextBusinessDateStr))
-                .map(s => s.name)
-            )
+            filteredStaffList
+              .filter(s => s.holidaysYukyu && s.holidaysYukyu.includes(nextBusinessDateStr))
+              .map(s => s.name)
+          )
           : new Set<string>();
         const holidaysFurikyuNext = nextBusinessDateStr
           ? new Set(
-              filteredStaffList
-                .filter(s => s.holidaysFurikyu && s.holidaysFurikyu.includes(nextBusinessDateStr))
-                .map(s => s.name)
-            )
+            filteredStaffList
+              .filter(s => s.holidaysFurikyu && s.holidaysFurikyu.includes(nextBusinessDateStr))
+              .map(s => s.name)
+          )
           : new Set<string>();
         const holidaysDaikyuNext = nextBusinessDateStr
           ? new Set(
-              filteredStaffList
-                .filter(s => s.holidaysDaikyu && s.holidaysDaikyu.includes(nextBusinessDateStr))
-                .map(s => s.name)
-            )
+            filteredStaffList
+              .filter(s => s.holidaysDaikyu && s.holidaysDaikyu.includes(nextBusinessDateStr))
+              .map(s => s.name)
+          )
           : new Set<string>();
         console.log(
           `被依存ポジション ${pos.name}：次営業日(${nextBusinessDateStr})の specialHolidays:`,
@@ -717,7 +756,7 @@ export async function POST(request: Request) {
         }
       }
 
-      
+
 
       // ──【③ 通常ポジション（staffSeveral=false, sameStaffWeekly=false）の割当処理】──────────────────────────
       for (const pos of normalPositions) {
@@ -754,11 +793,11 @@ export async function POST(request: Request) {
         }
       }
 
-      
+
 
       // ──【未割当スタッフが残っている場合の追加処理】──────────────────────────
-        // もし利用可能なスタッフセットにまだ残りがある場合、
-        // それらのスタッフについて、担当可能なポジションに再度割当てる処理を行う
+      // もし利用可能なスタッフセットにまだ残りがある場合、
+      // それらのスタッフについて、担当可能なポジションに再度割当てる処理を行う
       if (availableStaff.size > 0) {
         const stillUnassigned = Array.from(availableStaff)
           .map((name) => filteredStaffList.find((s) => s.name === name))
@@ -809,6 +848,101 @@ export async function POST(request: Request) {
       worksheet.getCell(`${colLetter}${targetRow}`).value = assignment;
     }
   });
+
+  // ──────────────────────────────
+  // 【Excelの最終フォーマット設定】
+  // ──────────────────────────────
+
+  worksheet.eachRow((row) => {
+    row.eachCell((cell) => {
+      cell.alignment = { vertical: "middle", horizontal: "center" }; // 中央揃え
+    });
+  });
+  
+  // 土曜日・日曜日・日本の祝日の行を薄いグレーで塗りつぶす
+  for (let i = 2; i <= dates.length + 1; i++) {
+    const date = dates[i - 2]; // dates配列は0始まりなので調整
+    const day = date.getDay();
+    const isHoliday = await isJapaneseHoliday(date);
+
+    if (day === 0 || day === 6 || isHoliday) {
+      worksheet.getRow(i).eachCell((cell) => {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFD3D3D3" }, // 薄いグレー
+        };
+      });
+    }
+  }
+
+  // 1行目の高さを70ピクセルにする
+  worksheet.getRow(1).height = 50;
+
+  // 2行目から32行目の高さを40ピクセルにする
+  for (let i = 2; i <= 32; i++) {
+    worksheet.getRow(i).height = 20;
+  }
+
+  // 列幅設定（ExcelJS の width は「文字数」で指定）
+  // ※105ピクセル ≒ 15文字, 118ピクセル ≒ 17文字, 145ピクセル ≒ 21文字, 220ピクセル ≒ 31文字
+  worksheet.getColumn("A").width = 6;
+
+  // 罫線設定
+  // 1行目に二重線の下罫線を付ける
+  worksheet.getRow(1).eachCell((cell) => {
+    cell.border = {
+      ...cell.border,
+      bottom: { style: "double", color: { argb: "FF000000" } }
+    };
+  });
+
+  // A列に二重線の右罫線を付ける
+  worksheet.getColumn("A").eachCell((cell) => {
+    cell.border = {
+      ...cell.border,
+      right: { style: "double", color: { argb: "FF000000" } }
+    };
+  });
+
+  // 2行目から32行目に点線の下罫線を付ける
+  for (let i = 2; i <= 32; i++) {
+    worksheet.getRow(i).eachCell((cell) => {
+      cell.border = {
+        ...cell.border,
+        bottom: { style: "dotted", color: { argb: "FF000000" } }
+      };
+    });
+  }
+
+  // B列からW列に点線の右罫線を付ける
+  for (let charCode = "B".charCodeAt(0); charCode <= "W".charCodeAt(0); charCode++) {
+    const colLetter = String.fromCharCode(charCode);
+    worksheet.getColumn(colLetter).eachCell((cell) => {
+      cell.border = {
+        ...cell.border,
+        right: { style: "dotted", color: { argb: "FF000000" } }
+      };
+    });
+  }
+
+  // ──────────────────────────────
+  // 【A列からZ列の2～35行目で "未配置" セルを赤く塗りつぶす処理】
+  // ──────────────────────────────
+  for (let row = 2; row <= 35; row++) {
+    // A～Zは文字コード65（A）～90（Z）
+    for (let charCode = 65; charCode <= 90; charCode++) {
+      const colLetter = String.fromCharCode(charCode);
+      const cell = worksheet.getCell(`${colLetter}${row}`);
+      if (cell.value === "未配置") {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFFF0000" } // 赤色
+        };
+      }
+    }
+  }
 
   const buffer = await workbook.xlsx.writeBuffer();
   const uint8Array = new Uint8Array(buffer);

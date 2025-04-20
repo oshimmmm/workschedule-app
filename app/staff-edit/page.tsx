@@ -53,8 +53,8 @@ export default function StaffEditPage() {
   };
 
   const filteredPositionOptions = selectedDepartment
-  ? positionOptions.filter((option) => option.departments && option.departments.includes(selectedDepartment))
-  : positionOptions;
+    ? positionOptions.filter((option) => option.departments && option.departments.includes(selectedDepartment))
+    : positionOptions;
 
   // APIからポジション情報を取得（departments情報も含む）
   const fetchPositions = async () => {
@@ -74,17 +74,26 @@ export default function StaffEditPage() {
   // スタッフ情報登録／更新の送信処理
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
     // availablePositions の空文字は除外
     const cleanedPositions = formData.availablePositions.filter(
       (pos) => pos.trim() !== ""
     );
+
     // departmentsの空文字も除外
     const cleanedDepartments = formData.departments
       .map((d) => d.trim())
       .filter((d) => d !== "");
+
+    // 選択されなかったポジションを削除
+    const validPositions = filteredPositionOptions.map((option) => option.name);
+    const updatedPositions = cleanedPositions.filter((pos) =>
+      validPositions.includes(pos)
+    );
+
     const payload = {
       ...formData,
-      availablePositions: cleanedPositions,
+      availablePositions: updatedPositions,
       departments: cleanedDepartments,
     };
 
