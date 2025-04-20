@@ -340,6 +340,11 @@ export async function POST(request: Request) {
   // 通常の（staffSeveral=false）ポジションごとのスタッフ別カウンター
   const normalCounts: { [posId: string]: { [staffName: string]: number } } = {};
 
+  // 月間トータル割当回数を管理するオブジェクトを初期化
+  const overallCounts: { [staffName: string]: number } = {};
+  filteredStaffList.forEach((staff) => {
+    overallCounts[staff.name] = 0;
+  });
 
   console.log(`[generate] dates.length = ${dates.length}`);
   console.log(`[generate] positions.length = ${filteredPositions.length}`);
@@ -545,7 +550,7 @@ export async function POST(request: Request) {
       const dailyAssigned = new Set<string>(); // staffSeveral=false 用
       const dailyAssignedSeveral = new Set<string>(); // staffSeveral=true 用
 
-      // ──【④ staffSeveral=true の割当処理】──────────────────────────
+      // staffSeveral=true の割当処理
       for (const pos of normalPositions) {
         if (pos.dependence && pos.dependence.trim() !== "") continue;
         if (referencedIndependentIds.has(pos.id)) continue;
@@ -553,6 +558,8 @@ export async function POST(request: Request) {
         if (!staffSeveralCounts[pos.id]) {
           staffSeveralCounts[pos.id] = {};
         }
+
+        // 候補スタッフをフィルタリング
         const candidates = filteredStaffList.filter((s) => {
           if (!s.availablePositions || !s.availablePositions.includes(pos.name)) return false;
           if (dailyAssignedSeveral.has(s.name)) return false;
@@ -566,7 +573,9 @@ export async function POST(request: Request) {
           if (!availableStaff.has(s.name)) return false;
           return true;
         });
+
         if (candidates.length > 0) {
+          // 配置回数が最小のスタッフを優先的に選択
           let minCount = Infinity;
           for (const s of candidates) {
             const count = staffSeveralCounts[pos.id][s.name] || 0;
@@ -575,13 +584,68 @@ export async function POST(request: Request) {
           const finalCandidates = candidates.filter(
             (s) => (staffSeveralCounts[pos.id][s.name] || 0) === minCount
           );
+
+          // 候補者からランダムに選択
           const chosenObj = finalCandidates[Math.floor(Math.random() * finalCandidates.length)];
           const chosen = chosenObj.name;
+
+          // 割当処理
           staffAssignments[dateStr][pos.id].push(chosen);
           dailyAssignedSeveral.add(chosen);
           staffSeveralCounts[pos.id][chosen] = (staffSeveralCounts[pos.id][chosen] || 0) + 1;
         } else {
+          // 候補がいない場合
           staffAssignments[dateStr][pos.id].push(pos.required ? "未配置" : "");
+        }
+      }
+
+      // staffSeveral=true かつ allowMultiple=false のポジションにおける配置回数を均等化
+      const staffSeveralSinglePositions = normalPositions.filter(
+        (pos) => pos.staffSeveral && !pos.allowMultiple
+      );
+
+      for (const pos of staffSeveralSinglePositions) {
+        const assignedCounts = staffSeveralCounts[pos.id] || {};
+        const minCount = Math.min(...Object.values(assignedCounts));
+        const maxCount = Math.max(...Object.values(assignedCounts));
+
+        // 配置回数が均等でない場合に調整を行う
+        if (maxCount - minCount > 1) {
+          const overAssignedStaff = Object.entries(assignedCounts)
+            .filter(([_, count]) => count > minCount)
+            .map(([staffName]) => staffName);
+
+          const underAssignedStaff = Object.entries(assignedCounts)
+            .filter(([_, count]) => count === minCount)
+            .map(([staffName]) => staffName);
+
+          for (const dateStr of Object.keys(staffAssignments)) {
+            const assignedStaff = staffAssignments[dateStr][pos.id];
+            if (!assignedStaff || assignedStaff.length === 0) continue;
+
+            // 割り当てられたスタッフを調整
+            for (let i = 0; i < assignedStaff.length; i++) {
+              const staffName = assignedStaff[i];
+              if (overAssignedStaff.includes(staffName) && underAssignedStaff.length > 0) {
+                // 配置回数が少ないスタッフに置き換える
+                const newStaff = underAssignedStaff.shift();
+                if (newStaff) {
+                  assignedStaff[i] = newStaff;
+                  staffSeveralCounts[pos.id][staffName]--;
+                  staffSeveralCounts[pos.id][newStaff] = (staffSeveralCounts[pos.id][newStaff] || 0) + 1;
+
+                  // 再度均等化のためのリストを更新
+                  overAssignedStaff.splice(overAssignedStaff.indexOf(staffName), 1);
+                  if (staffSeveralCounts[pos.id][staffName] > minCount) {
+                    overAssignedStaff.push(staffName);
+                  }
+                  if (staffSeveralCounts[pos.id][newStaff] === minCount + 1) {
+                    underAssignedStaff.splice(underAssignedStaff.indexOf(newStaff), 1);
+                  }
+                }
+              }
+            }
+          }
         }
       }
 
@@ -761,33 +825,54 @@ export async function POST(request: Request) {
       // ──【③ 通常ポジション（staffSeveral=false, sameStaffWeekly=false）の割当処理】──────────────────────────
       for (const pos of normalPositions) {
         if (pos.dependence && pos.dependence.trim() !== "") continue;
-        // 既に被依存割当対象で処理済み（または週単位固定対象の場合はスキップ）
         if (referencedIndependentIds.has(pos.id)) continue;
         if (pos.sameStaffWeekly) continue;
         if (pos.staffSeveral) continue;
+
         if (!normalCounts[pos.id]) {
           normalCounts[pos.id] = {};
         }
-        const availableForPos = filteredStaffList
-          .filter((s) => {
-            if (!s.availablePositions || !s.availablePositions.includes(pos.name)) return false;
-            if (!availableStaff.has(s.name)) return false;
-            if (dailyAssigned.has(s.name)) return false;
-            return true;
-          })
-          .map((s) => s.name);
+
+        const availableForPos = filteredStaffList.filter((s) => {
+          if (!s.availablePositions || !s.availablePositions.includes(pos.name)) return false;
+          if (!availableStaff.has(s.name)) return false;
+          if (dailyAssigned.has(s.name)) return false;
+          return true;
+        });
+
         if (availableForPos.length > 0) {
-          let minCount = Infinity;
-          for (const sName of availableForPos) {
-            const count = normalCounts[pos.id][sName] || 0;
-            if (count < minCount) minCount = count;
-          }
-          const finalCandidates = availableForPos.filter(sName => (normalCounts[pos.id][sName] || 0) === minCount);
-          const chosen = finalCandidates[Math.floor(Math.random() * finalCandidates.length)];
+          // ポジション専用の回数と月間トータル回数の両方を考慮して候補者を選定
+          let minPosCount = Infinity;
+          let minOverallCount = Infinity;
+
+          availableForPos.forEach((s) => {
+            const posCount = normalCounts[pos.id][s.name] || 0;
+            const overallCount = overallCounts[s.name];
+            if (
+              posCount < minPosCount ||
+              (posCount === minPosCount && overallCount < minOverallCount)
+            ) {
+              minPosCount = posCount;
+              minOverallCount = overallCount;
+            }
+          });
+
+          const finalCandidates = availableForPos.filter(
+            (s) =>
+              (normalCounts[pos.id][s.name] || 0) === minPosCount &&
+              overallCounts[s.name] === minOverallCount
+          );
+
+          const chosen = finalCandidates[Math.floor(Math.random() * finalCandidates.length)].name;
+
+          // 割当処理
           staffAssignments[dateStr][pos.id].push(chosen);
           dailyAssigned.add(chosen);
           availableStaff.delete(chosen);
+
+          // カウント更新
           normalCounts[pos.id][chosen] = (normalCounts[pos.id][chosen] || 0) + 1;
+          overallCounts[chosen] += 1;
         } else {
           staffAssignments[dateStr][pos.id].push(pos.required ? "未配置" : "");
         }
